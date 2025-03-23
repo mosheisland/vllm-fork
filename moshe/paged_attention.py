@@ -15,6 +15,13 @@ PAD_BLOCK_ID = -1
 DO_PAD_BATCH = True
 DO_PAD_MAX_SEQLEN_K = True
 DO_PAD_MAX_SEQLEN_Q = True
+DO_AVOID_FULLY_PADDED_CHUNKS = True
+
+# Default bins configuration
+BATCH_BINS = [1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256]
+MAX_SEQLEN_K_BINS = [128, 256, 384, 512, 768, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 4096]
+MAX_SEQLEN_Q_BINS = [1, 2, 3, 4, 6, 8, 16, 32, 64, 128, 256, 384, 512, 768, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 4096]
+NON_MASKED_BATCH_BINS = sorted(list(set([0, 1, 2, 3, 4, 5, 6, 7, 8] + BATCH_BINS)))
 
 
 def mark_step():
@@ -26,7 +33,7 @@ def nearset_multiple(value, divisor):
     return int(math.ceil(value / divisor)) * divisor
 
 
-def get_padded_tensor_on_batch_dim(t, padded_batch):
+def bucketize_tensor_on_batch_dim(t, padded_batch):
     """ Pad (prepend) tensor on batch dim
 
         Padding is *prepended* to batch dim.
@@ -44,45 +51,69 @@ def get_padded_tensor_on_batch_dim(t, padded_batch):
     return t_padded
 
 
-def get_padded_batch(batch):
+def get_bucketed_batch(batch):
     """ Force static shapes by padding batch to nearest batch bin """
     padded_batch = batch
     if DO_PAD_BATCH:
-        bins = [1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384]
-        if batch > bins[-1]:
+        if batch > BATCH_BINS[-1]:
             return nearset_multiple(batch, 64)
 
-        i = bisect_left(bins, batch)
-        padded_batch = bins[i]
+        i = bisect_left(BATCH_BINS, batch)
+        padded_batch = BATCH_BINS[i]
     return padded_batch
 
 
-def get_padded_max_seqlen_k(max_seqlen_k):
+def get_bucketed_max_seqlen_k(max_seqlen_k):
     """ Force static shapes by padding max_seqlen_k to nearest bin.
         This controls the size of the K dim of the attention matrix (aka m).
     """
     padded_max_seqlen_k = max_seqlen_k
     if DO_PAD_MAX_SEQLEN_K:
-        bins = [128, 256, 384, 512, 768, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 4096]
-        if max_seqlen_k > bins[-1]:
+        if max_seqlen_k > MAX_SEQLEN_K_BINS[-1]:
             return nearset_multiple(max_seqlen_k, 1024)
-        i = bisect_left(bins, max_seqlen_k)
-        padded_max_seqlen_k = bins[i]
+        i = bisect_left(MAX_SEQLEN_K_BINS, max_seqlen_k)
+        padded_max_seqlen_k = MAX_SEQLEN_K_BINS[i]
     return padded_max_seqlen_k
 
 
-def get_padded_max_seqlen_q(max_seqlen_q):
+def get_bucketed_max_seqlen_q(max_seqlen_q):
     """ Force static shapes by padding max_seqlen_q to nearest bin.
         This controls the size of the Q dim of the attention matrix (aka n).
     """
     padded_max_seqlen_q = max_seqlen_q
     if DO_PAD_MAX_SEQLEN_Q:
-        bins = [1, 2, 3, 4, 6, 8, 16, 32, 64, 128, 256, 384, 512, 768, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 4096]
-        if max_seqlen_q > bins[-1]:
+        if max_seqlen_q > MAX_SEQLEN_Q_BINS[-1]:
             return nearset_multiple(max_seqlen_q, 1024)
-        i = bisect_left(bins, max_seqlen_q)
-        padded_max_seqlen_q = bins[i]
+        i = bisect_left(MAX_SEQLEN_Q_BINS, max_seqlen_q)
+        padded_max_seqlen_q = MAX_SEQLEN_Q_BINS[i]
     return padded_max_seqlen_q
+
+
+def get_bucketed_n_non_masked(n_non_masked):
+    """ When calculating attention for a specific chunk, we only calculate for samples that are not fully masked.
+        In order to avoid dynamic shapes, we force static shapes by padding n_non_masked to nearest bin.
+    """
+    n_padded_non_masked = n_non_masked
+    if DO_AVOID_FULLY_PADDED_CHUNKS:
+        if n_non_masked > NON_MASKED_BATCH_BINS[-1]:
+            return nearset_multiple(n_non_masked, 256)
+        i = bisect_left(NON_MASKED_BATCH_BINS, n_non_masked)
+        n_padded_non_masked = NON_MASKED_BATCH_BINS[i]
+    return n_padded_non_masked
+
+
+def bucketize_non_masked_tensor(n_non_masked, non_masked):
+    """ Given non_masked 1D tensor, bucketize it by flipping false to true to get
+        n_non_masked_bucketed true values. This will ensure that the rest of the graph
+        will have static shapes with batch = n_non_masked_bucketed.
+    """
+    b_padded = non_masked.shape[0]
+    n_non_masked_bucketed = get_bucketed_n_non_masked(n_non_masked)
+    sorting_indices = torch.argsort(non_masked.to(torch.int), descending=True)
+    mask = torch.arange(b_padded, device=non_masked.device) < n_non_masked_bucketed
+    non_masked_bucketed = torch.zeros(b_padded, dtype=torch.bool, device=non_masked.device)
+    non_masked_bucketed[sorting_indices] = mask
+    return non_masked_bucketed
 
 
 def convert_right_pad_to_left_pad(blocks: torch.Tensor, seq_used: torch.Tensor, block_size: int):
@@ -462,6 +493,7 @@ def write_back_q_slice_to_tensor(
     # valid_indices include last_index as pad values.
     # however, when writing the last k chunk, the pads will override the real value of the last index
     # therefore, we work around this by re-writing the value of the last index
+
     is_last_index_in_slice = t_indices[-1, -1].eq(last_index).logical_and(slice_select_mask[-1, -1])
     t[last_index] = torch.where(is_last_index_in_slice, t_slice[-1, -1], t_at_last_index)
 
@@ -551,21 +583,21 @@ def paged_attention_var_len(
     # to use static/pre-compiled recipies.
 
     # Calculate bucketing of batch dim
-    b_padded = get_padded_batch(b)
+    b_padded = get_bucketed_batch(b)
 
     # Calculate bucketing of m, n dimensions
     # bucketize m (i.e. max_seqlen_k) and then make it divisible by k chunk size
     # bucketize n (i.e. max_seqlen_q) and then make it divisible by q chunk size
-    m_padded = nearset_multiple(get_padded_max_seqlen_k(m), chunk_size_k)
-    n_padded = nearset_multiple(get_padded_max_seqlen_q(n), chunk_size_q)
+    m_padded = nearset_multiple(get_bucketed_max_seqlen_k(m), chunk_size_k)
+    n_padded = nearset_multiple(get_bucketed_max_seqlen_q(n), chunk_size_q)
 
     # Remove cu_seqlens_q[0] which is always 0. This will make it of shape (batch, )
     cu_seqlens_q = cu_seqlens_q[1:]
 
     # Bucketize tensors
-    seqused_k = get_padded_tensor_on_batch_dim(seqused_k, b_padded)
-    cu_seqlens_q = get_padded_tensor_on_batch_dim(cu_seqlens_q, b_padded)
-    block_table = get_padded_tensor_on_batch_dim(block_table, b_padded)
+    seqused_k = bucketize_tensor_on_batch_dim(seqused_k, b_padded)
+    cu_seqlens_q = bucketize_tensor_on_batch_dim(cu_seqlens_q, b_padded)
+    block_table = bucketize_tensor_on_batch_dim(block_table, b_padded)
 
     # -----------------------------------------
     # From HERE, all tensors should be bucketed
@@ -589,21 +621,17 @@ def paged_attention_var_len(
 
     # Online softmax Outer loop over KV blocks
     for j in range(0, m_padded, chunk_size_k):
-        k_j, v_j, kv_j_pad_mask = gather_kv_tokens(
+        k_j_full, v_j_full, kv_j_pad_mask = gather_kv_tokens(
             k, v, block_id_for_token_idx, offset_in_block_for_token_idx, chunk_start=j, chunk_size=chunk_size_k)
-        k_j = k_j.transpose(1, 2)  # (b, nh, chunk_m, d)
-        v_j = v_j.transpose(1, 2)  # (b, nh, chunk_m, d)
+        k_j_full = k_j_full.transpose(1, 2)  # (b, nh, chunk_m, d)
+        v_j_full = v_j_full.transpose(1, 2)  # (b, nh, chunk_m, d)
 
         j_end = j + chunk_size_k
-        k_j_scaled = k_j * softmax_scale
+        k_j_scaled_full = k_j_full * softmax_scale
         for i in range(0, n_padded, chunk_size_q):  # Inner loop over Q blocks
             # calculate indices and mask for current chunk for q-shaped tensors
             chunk_i_idx, chunk_i_pad_mask = calculate_q_chunk_indices(
                 cu_seqlens_q, max_seqlen=n_padded, chunk_start=i, chunk_size=chunk_size_q)
-
-            # gather q slice after applying pad mask
-            q_i = gather_q_slice_from_tensor(q, chunk_i_idx, chunk_i_pad_mask, pad_val=0.)
-            q_i = q_i.transpose(1, 2)   # (b, nh, chunk_n, d)
 
             # for causality, we normalize i to j to simulate an m x m matrix
             normalized_i = i + m_padded - n_padded
@@ -622,6 +650,42 @@ def paged_attention_var_len(
             if causal:
                 causal_mask = get_qk_chunk_causal_mask(normalized_i, normalized_i_end, j, j_end, q.device)
                 pad_mask = pad_mask.logical_or(causal_mask.unsqueeze(0))
+
+            k_j_scaled = k_j_scaled_full
+            v_j = v_j_full
+
+            if DO_AVOID_FULLY_PADDED_CHUNKS:
+                # fully_masked are samples that are entirely masked-out (no need to process the chunk)
+                # non_masked are the rest of the samples (it is required to process the chunk)
+                fully_masked = torch.all(pad_mask.view(b_padded, -1), dim=-1)   # (b, chunk_size_q * chunk_size_k)
+                non_masked = ~fully_masked
+
+                # --------------------------------------------------------------------------------
+                # the number of non-masked samples is dynamic, therefore force a graph break here!
+                # --------------------------------------------------------------------------------
+                n_non_masked = non_masked.sum().item()
+                mark_step()
+
+                # nothing samples to process. skip entirely this chunk.
+                if n_non_masked == 0:
+                    continue
+
+                # get the bucketed number of the non-masked samples
+                # then, bucketize non_masked accordingly
+                non_masked_bucketed = bucketize_non_masked_tensor(n_non_masked, non_masked)
+
+                # modify masks to "gather" non-masked samples (after bucketing)
+                pad_mask = pad_mask[non_masked_bucketed]
+                chunk_i_idx = chunk_i_idx[non_masked_bucketed]
+                chunk_i_pad_mask = chunk_i_pad_mask[non_masked_bucketed]
+
+                # get k, v slices for non-masked samples
+                k_j_scaled = k_j_scaled_full[non_masked_bucketed]
+                v_j = v_j_full[non_masked_bucketed]
+
+            # gather q slice after applying pad mask
+            q_i = gather_q_slice_from_tensor(q, chunk_i_idx, chunk_i_pad_mask, pad_val=0.)
+            q_i = q_i.transpose(1, 2)   # (b, nh, chunk_n, d)
 
             # perform bmm(q, k.T) and apply calculated mask (note that h dim is transposed)
             s_ij = torch.einsum('bhnd,bhmd->bhnm', q_i, k_j_scaled)    # (b, nh, chunk_n, chunk_m)
@@ -654,5 +718,10 @@ def paged_attention_var_len(
             write_back_q_slice_to_tensor(out, o_i_new.transpose(1, 2), chunk_i_idx, chunk_i_select_mask)
             write_back_q_slice_to_tensor(sm_l, l_i_new.transpose(1, 2), chunk_i_idx, chunk_i_select_mask)
             write_back_q_slice_to_tensor(sm_m, m_i_new.transpose(1, 2), chunk_i_idx, chunk_i_select_mask)
+
+            # --------------------------------------------------------------------------------
+            # end of dynamic graph
+            # --------------------------------------------------------------------------------
+            mark_step() if DO_AVOID_FULLY_PADDED_CHUNKS else None
 
     return out
