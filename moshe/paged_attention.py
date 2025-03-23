@@ -474,27 +474,36 @@ def gather_q_slice_from_tensor(t: torch.Tensor, indices: torch.Tensor, pad_mask:
     return t_chunk
 
 
-def write_back_q_slice_to_tensor(
-        t: torch.Tensor,
-        t_slice: torch.Tensor,
+def calculate_q_slice_write_back_indices(
+        q_n_tokens: int,
         t_indices: torch.Tensor,
         slice_select_mask: torch.Tensor
 ):
-    """ Write slice_select_mask of t_slice back to tensor t at the given t_indices
+    """ Calculate the write-back indices to a q-like tensor.
+
+        The valid_indices include last_index as pad values.
+        However, when writing the last k chunk, the pads will override the real value of the last index
+        Therefore, we work around this by re-writing the value of the last index
+    """
+    last_index = q_n_tokens - 1
+    valid_indices = torch.where(slice_select_mask, t_indices, last_index)
+    is_last_index_in_slice = t_indices[-1, -1].eq(last_index).logical_and(slice_select_mask[-1, -1])
+    return valid_indices, is_last_index_in_slice
+
+
+def write_back_q_slice_to_tensor(
+        t: torch.Tensor,
+        t_slice: torch.Tensor,
+        q_indices: torch.Tensor,
+        is_last_index_in_slice: torch.Tensor
+):
+    """ Write back t_slice into t[q_indices].
         For non-selected indices, we gather into the 'last_index' of t.
         The actual last_index is written last (timeline wise) which ensures correctness.
     """
-    # TODO: this method is called multiple times per inner iteration. Refactor to avoid re-calculation of
-    #       valid_indices and is_last_index_in_slice
     last_index = t.shape[0] - 1
     t_at_last_index = t[last_index]
-    valid_indices = torch.where(slice_select_mask, t_indices, last_index)
-    t[valid_indices] = t_slice
-    # valid_indices include last_index as pad values.
-    # however, when writing the last k chunk, the pads will override the real value of the last index
-    # therefore, we work around this by re-writing the value of the last index
-
-    is_last_index_in_slice = t_indices[-1, -1].eq(last_index).logical_and(slice_select_mask[-1, -1])
+    t[q_indices] = t_slice
     t[last_index] = torch.where(is_last_index_in_slice, t_slice[-1, -1], t_at_last_index)
 
 
@@ -713,11 +722,16 @@ def paged_attention_var_len(
             o_i_new = l_i * o_i + e_new * torch.einsum('bhnm,bhmd->bhnd', p_ij, v_j)
             o_i_new = torch.where(l_i_new.eq(0), float(0), o_i_new / l_i_new)
 
-            # write back chunks into place
+            # calculate the indices in q-like tensor to write back the current slice
             chunk_i_select_mask = ~chunk_i_pad_mask
-            write_back_q_slice_to_tensor(out, o_i_new.transpose(1, 2), chunk_i_idx, chunk_i_select_mask)
-            write_back_q_slice_to_tensor(sm_l, l_i_new.transpose(1, 2), chunk_i_idx, chunk_i_select_mask)
-            write_back_q_slice_to_tensor(sm_m, m_i_new.transpose(1, 2), chunk_i_idx, chunk_i_select_mask)
+            q_indices,  is_last_index_in_slice = calculate_q_slice_write_back_indices(
+                q_n_tokens=out.shape[0], t_indices=chunk_i_idx, slice_select_mask=chunk_i_select_mask
+            )
+
+            # write back chunks into place
+            write_back_q_slice_to_tensor(out, o_i_new.transpose(1, 2), q_indices,  is_last_index_in_slice)
+            write_back_q_slice_to_tensor(sm_l, l_i_new.transpose(1, 2), q_indices,  is_last_index_in_slice)
+            write_back_q_slice_to_tensor(sm_m, m_i_new.transpose(1, 2), q_indices,  is_last_index_in_slice)
 
             # --------------------------------------------------------------------------------
             # end of dynamic graph
