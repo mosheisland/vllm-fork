@@ -147,9 +147,9 @@ def extract_blocks(tokens_to_block, max_blocks):
         max_blocks = 3
         extract_blocks(t, max_blocks)
         tensor([
-            [1, 2, 3],
-            [0, 5, 6],
-            [0, 0, 7]
+            [ 1,  2, 3],
+            [-1,  5, 6],
+            [-1, -1, 7]
         ])
     """
     batch, m = tokens_to_block.shape
@@ -251,9 +251,15 @@ def compute_block_id_for_token_idx(m, block_table, tokens_per_block):
     # Create index offsets for each token
     token_offsets = torch.arange(m, device=block_table.device).expand(batch, m)
 
-    # Expand tokens_per_block to cumulative indices
+    # token_counts_except_last_block is the cumulative number of tokens per block except the last block
+    # calculated in 2 steps:
+    # 1. token_counts_except_last_block: calculate the cumulative number of tokens from next block till last block
+    # 2. m - token_counts_except_last_block: cumulative number of tokens in current block
     token_counts_except_last_block = tokens_per_block[:, 1:].flip(dims=[1]).cumsum(dim=1).flip(dims=[1])
     token_counts_except_last_block = m - token_counts_except_last_block
+
+    # we know that the number of cumulative tokens on last block is m
+    # therefore, token_counts is a concat of: token_counts_except_last_block + [m]
     token_counts_last_block = torch.full((batch, 1), fill_value=m, device=tokens_per_block.device,
                                          dtype=tokens_per_block.dtype)
     token_counts = torch.cat([token_counts_except_last_block, token_counts_last_block], dim=1)
@@ -436,7 +442,7 @@ def calculate_q_chunk_indices(cu_seqlen: torch.Tensor, max_seqlen: int, chunk_st
             indices, pad_mask = calculate_q_chunk_indices(cu_seqlen, max_seqlen, chunk_start, chunk_size)
 
         Returned indices and masks:
-        chunk_start=0:  indices = [[-7, -6, -5, -4], [4,   6,  7,  8]]  pad_mask = [[1, 1, 1, 1], [1, 0, 0, 0]]
+        chunk_start=0:  indices = [[-7, -6, -5, -4], [4,   5,  6,  7]]  pad_mask = [[1, 1, 1, 1], [1, 0, 0, 0]]
         chunk_start=4:  indices = [[-3, -2, -1,  0], [8,   9, 10, 11]]  pad_mask = [[1, 1, 1, 0], [0, 0, 0, 0]]
         chunk_start=8:  indices = [[ 1,  2,  3,  4], [12, 13, 14, 15]]  pad_mask = [[0, 0, 0, 0], [0, 0, 0, 0]]
 
@@ -624,6 +630,7 @@ def paged_attention_var_len(
     offset_in_block_for_token_idx = compute_per_token_offset_in_block(block_id_for_token_idx)
 
     # step 5: allocate final output and online softmax partial tensors
+    # TODO: consider using transpose on sm_l, sm_m
     out = torch.zeros_like(q) if out is None else out.zero_()
     sm_l = torch.zeros((n_q_tokens, n_heads, 1), dtype=q.dtype, device=q.device)
     sm_m = torch.full((n_q_tokens, n_heads, 1), float('-inf'), dtype=q.dtype, device=q.device)
@@ -666,7 +673,7 @@ def paged_attention_var_len(
             if DO_AVOID_FULLY_PADDED_CHUNKS:
                 # fully_masked are samples that are entirely masked-out (no need to process the chunk)
                 # non_masked are the rest of the samples (it is required to process the chunk)
-                fully_masked = torch.all(pad_mask.view(b_padded, -1), dim=-1)   # (b, chunk_size_q * chunk_size_k)
+                fully_masked = torch.all(pad_mask.view(b_padded, -1), dim=-1)   # (b, 1)
                 non_masked = ~fully_masked
 
                 # --------------------------------------------------------------------------------
