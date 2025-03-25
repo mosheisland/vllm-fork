@@ -396,15 +396,12 @@ def gather_kv_tokens(k, v, block_id_for_token_idx, offset_in_block_for_token_idx
     # elements that were gathered. this is done per row.
     right_most_offset_in_block = sliced_offset_in_block[:, -1] % block_size
     n_extra_right_tokens = block_size - (right_most_offset_in_block + 1)
-
     n_gathered_tokens = blocks_to_gather.shape[1] * block_size
     n_extra_left_tokens = n_gathered_tokens - chunk_size - n_extra_right_tokens
-    right_extra_token_1st_idx = n_gathered_tokens - n_extra_right_tokens
-    remove_extra_mask = torch.arange(n_gathered_tokens, device=k.device).unsqueeze(0).repeat(batch, 1)
-    remove_extra_mask = torch.logical_and(
-        (remove_extra_mask >= n_extra_left_tokens.unsqueeze(1)),
-        (remove_extra_mask < right_extra_token_1st_idx.unsqueeze(1))
-    )
+    # keep_indices are running chunk indices shifted by the number of extra left tokens
+    keep_indices = torch.arange(chunk_size, device=k.device).unsqueeze(0).repeat(batch, 1)
+    keep_indices = keep_indices + n_extra_left_tokens.unsqueeze(1)
+    keep_indices = keep_indices.view(batch, chunk_size, 1, 1).repeat(1, 1, nh, d)
     pad_mask = (sliced_block_ids == PAD_BLOCK_ID)
 
     # gather blocks_to_gather into a continuous tensor, remove extra tokens and zero pad tokens
@@ -413,7 +410,7 @@ def gather_kv_tokens(k, v, block_id_for_token_idx, offset_in_block_for_token_idx
         tokens = block_cache[blocks_to_gather]   # Shape: (batch, n_blocks_to_gather, block_size,  nh, d)
         tokens = tokens.view(batch, -1, nh, d)   # shape: (batch, n_blocks_to_gather * block_size, nh, d)
         # Remove extra tokens from left and right block
-        tokens = tokens[remove_extra_mask].view(batch, chunk_size, nh, d)
+        tokens = tokens.gather(1, keep_indices)
         # Mask pad tokens
         tokens.masked_fill_(pad_mask.view(batch, chunk_size, 1, 1), 0)
         return tokens
