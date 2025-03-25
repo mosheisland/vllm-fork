@@ -138,6 +138,40 @@ def test_pa_compute_tokens_per_block(seq, block_size, max_blocks):
     assert torch.equal(res, expected)
 
 
+@pytest.mark.parametrize("m, seq, block_size, max_blocks", [
+    (9, [9, 8, 2],  3, 4),
+    (9, [9, 8, 2],  3, 3),
+    (9, [9, 9, 9],  3, 3),
+])
+def test_pa_compute_block_id_for_token_idx(m, seq, block_size, max_blocks):
+    batch = len(seq)
+    t_seq = torch.tensor(seq, dtype=torch.long)
+    t_tokens_per_block = compute_tokens_per_block(t_seq, block_size, max_blocks)
+    t_block_table = torch.zeros((batch, max_blocks), dtype=torch.long)
+    for i in range(batch):
+        t_block_table[i, :] = torch.arange(i * max_blocks, (i+1) * max_blocks)
+    t_block_table = convert_right_pad_to_left_pad(t_block_table, t_seq, block_size)
+    res = compute_block_id_for_token_idx(
+        m,
+        t_block_table.to(DEVICE),
+        t_tokens_per_block.to(DEVICE)
+    )
+    expected = torch.full((batch, m), -1, dtype=torch.long)
+    for i in range(batch):
+        block_index = max_blocks - 1
+        end_token_index = m
+        while seq[i] > 0:
+            remainder = seq[i] % block_size
+            n_tokens_in_block = remainder if remainder > 0 else block_size
+            start_token_index = end_token_index - n_tokens_in_block
+            expected[i, start_token_index: end_token_index] = t_block_table[i, block_index]
+            seq[i] -= n_tokens_in_block
+            block_index -= 1
+            end_token_index = start_token_index
+    res = res.to('cpu')
+    assert torch.equal(res, expected)
+
+
 def test_pa_gather_kv_tokens():
     batch = 3
     nh = 1
