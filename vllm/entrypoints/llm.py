@@ -1417,7 +1417,9 @@ class LLM:
             pbar.close()
 
         # Make sure that all workers are finished.
-        self.llm_engine.stop_remote_worker_execution_loop()
+        # TBD: change workaround for running on non-hpu device
+        if hasattr(self.llm_engine, 'stop_remote_worker_execution_loop'):
+            self.llm_engine.stop_remote_worker_execution_loop()
 
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
