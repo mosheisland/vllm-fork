@@ -4,7 +4,7 @@ import torch
 import random
 from collections import deque
 from itertools import accumulate
-from paged_attention import (
+from vllm.attention.backends.torch_paged_attention import (
     nearset_multiple,
     calculate_q_chunk_indices,
     convert_right_pad_to_left_pad,
@@ -18,7 +18,7 @@ from paged_attention import (
 
 
 # Device under test. One of "cpu", "cuda", "hpu"
-DEVICE_TYPE = "hpu"
+DEVICE_TYPE = "cuda"
 
 if DEVICE_TYPE == "hpu":
     import habana_frameworks
