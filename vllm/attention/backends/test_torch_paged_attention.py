@@ -367,7 +367,6 @@ def test_pa_exhaustive(q_sizes, kv_sizes, max_chunk_size, max_block_size):
     max_seqlen_q = max(q_sizes)
     cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.long), q_sizes.cumsum(dim=0)])
     max_seqlen_k = max(kv_sizes).item()
-    seqused_k = torch.tensor(kv_sizes, dtype=torch.long)
 
     # test for all chunk sizes up till max_chunk_size and for all KV block sizes
     for block_size in range(1, max_block_size+1):
@@ -392,7 +391,7 @@ def test_pa_exhaustive(q_sizes, kv_sizes, max_chunk_size, max_block_size):
                     cu_seqlens_q=cu_seqlens_q.to(DEVICE),
                     max_seqlen_k=max_seqlen_k,
                     cu_seqlens_k=None,
-                    seqused_k=seqused_k.to(DEVICE),
+                    seqused_k=kv_sizes.to(DEVICE),
                     dropout_p=0.0,
                     softmax_scale=None,
                     causal=causal,
