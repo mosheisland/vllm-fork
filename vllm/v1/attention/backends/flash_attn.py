@@ -15,7 +15,7 @@ from vllm.attention.backends.utils import get_flash_attn_version
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from moshe.paged_attention import paged_attention_var_len
+from vllm.attention.backends.torch_paged_attention import paged_attention_var_len
 
 if current_platform.is_cuda():
     from vllm.vllm_flash_attn import flash_attn_varlen_func
